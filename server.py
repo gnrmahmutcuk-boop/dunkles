@@ -12,6 +12,12 @@ PORT = int(os.environ.get("PORT", "8000"))
 DAILY_LIMIT = int(os.environ.get("DAILY_LIMIT", "30"))  # cihaz başına günlük mesaj
 HERE = Path(__file__).parent
 
+# Doğal ses (isteğe bağlı): anahtar sadece burada durur, kullanıcı hiçbir şey girmez.
+ELEVEN_KEY = os.environ.get("ELEVEN_KEY", "sk_89b4e3b3010899ecda508f2ab97ddc905ca5edd92aa4712b")
+ELEVEN_VOICE = os.environ.get("ELEVEN_VOICE", "JBFqnCBsd6RMkjVDRZzb")
+ELEVEN_MODEL = os.environ.get("ELEVEN_MODEL", "eleven_multilingual_v2")
+TTS_DAILY_CHARS = int(os.environ.get("TTS_DAILY_CHARS", "4000"))  # cihaz başına günlük karakter
+
 SYSTEM = ("Sen dunkles adlı bir yapay zekâ asistanısın. Türkçe, kısa ve anlaşılır cevap ver. "
           "Öğrencilere yardımcı ol.")
 
@@ -25,6 +31,16 @@ LEVELS = [
 ]
 
 used, day = {}, [""]
+tts_used, tts_day = {}, [""]
+
+
+def allow_tts(who, n):
+    today = time.strftime("%Y-%m-%d")
+    if tts_day[0] != today:
+        tts_used.clear()
+        tts_day[0] = today
+    tts_used[who] = tts_used.get(who, 0) + n
+    return tts_used[who] <= TTS_DAILY_CHARS
 
 
 def allow(who):
@@ -71,7 +87,37 @@ class H(BaseHTTPRequestHandler):
         else:
             self._json(404, {"error": "Bulunamadı"})
 
+    def _speak(self):
+        if not ELEVEN_KEY:
+            return self._json(404, {"error": "Doğal ses kapalı"})
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            data = json.loads(self.rfile.read(n))
+            text = str(data["text"])[:600]
+        except Exception:
+            return self._json(400, {"error": "Geçersiz istek"})
+        who = str(data.get("device") or self.client_address[0])[:64]
+        if not allow_tts(who, len(text)):
+            return self._json(429, {"error": "Doğal ses hakkın bugünlük doldu."})
+        req = urllib.request.Request(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVEN_VOICE}",
+            json.dumps({"text": text, "model_id": ELEVEN_MODEL}).encode(),
+            {"Content-Type": "application/json", "xi-api-key": ELEVEN_KEY, "Accept": "audio/mpeg"})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                audio = r.read()
+        except Exception:
+            return self._json(502, {"error": "Ses servisi yanıt vermedi."})
+        self.send_response(200)
+        self._cors()
+        self.send_header("Content-Type", "audio/mpeg")
+        self.send_header("Content-Length", str(len(audio)))
+        self.end_headers()
+        self.wfile.write(audio)
+
     def do_POST(self):
+        if self.path == "/speak":
+            return self._speak()
         if self.path != "/chat":
             return self._json(404, {"error": "Bulunamadı"})
         try:
@@ -122,3 +168,4 @@ class H(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     print(f"dunkles hazır: http://localhost:{PORT}")
     ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
+              
